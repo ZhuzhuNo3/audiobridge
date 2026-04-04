@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish binaries
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build arm64 and x86_64
+        run: make all-arch
+
+      - name: Stage release assets
+        run: |
+          install -m0755 build/arm64/audiobridge audiobridge-darwin-arm64
+          install -m0755 build/x86_64/audiobridge audiobridge-darwin-x86_64
+          file audiobridge-darwin-arm64 audiobridge-darwin-x86_64
+          shasum -a256 audiobridge-darwin-arm64 audiobridge-darwin-x86_64 | tee SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "audiobridge ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            audiobridge-darwin-arm64 \
+            audiobridge-darwin-x86_64 \
+            SHA256SUMS.txt

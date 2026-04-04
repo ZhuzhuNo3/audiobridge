@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    name: Test (native)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run CLI tests
+        run: |
+          make clean && make
+          sh tests/run_all.sh
+
+  build:
+    name: Build macOS (${{ matrix.arch }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x86_64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile (${{ matrix.arch }})
+        run: |
+          make clean ARCH=${{ matrix.arch }}
+          make ARCH=${{ matrix.arch }}
+      - name: Verify Mach-O slice
+        run: |
+          file "build/${{ matrix.arch }}/audiobridge"
+          lipo -info "build/${{ matrix.arch }}/audiobridge"
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: audiobridge-macos-${{ matrix.arch }}
+          path: build/${{ matrix.arch }}/audiobridge
