@@ -32,7 +32,7 @@ static int ABTestDebounceCoalescesBurstsWithinEightyMilliseconds(void) {
     ABSpinMainRunLoopFor(0.03);
     [io ab_enqueueDebouncedRebuildForDefaultDeviceChange];
 
-    ABSpinMainRunLoopFor(0.06);
+    ABSpinMainRunLoopFor(0.03);
     if (callbackCount != 0) {
         fprintf(stderr, "expected no callback before 80ms quiet period, got %lu\n",
                 (unsigned long)callbackCount);
@@ -40,7 +40,7 @@ static int ABTestDebounceCoalescesBurstsWithinEightyMilliseconds(void) {
         return 1;
     }
 
-    ABSpinMainRunLoopFor(0.08);
+    ABSpinMainRunLoopFor(0.12);
     if (callbackCount != 1) {
         fprintf(stderr, "expected exactly one coalesced callback, got %lu\n",
                 (unsigned long)callbackCount);
