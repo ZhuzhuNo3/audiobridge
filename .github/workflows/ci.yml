@@ -11,7 +11,7 @@ jobs:
     name: Test (native)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build and run CLI tests
         run: |
           make clean && make
@@ -25,7 +25,7 @@ jobs:
       matrix:
         arch: [arm64, x86_64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Compile (${{ matrix.arch }})
         run: |
           make clean ARCH=${{ matrix.arch }}
