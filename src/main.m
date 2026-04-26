@@ -9,6 +9,7 @@
 #import <unistd.h>
 
 #import "ABDeviceQuery.h"
+#import "ABDeviceRecoveryCoordinator.h"
 #import "ABPassThroughEngine.h"
 #import "ABStdoutPCMWriter.h"
 #import "ABSystemDefaultIO.h"
@@ -18,6 +19,188 @@ static volatile sig_atomic_t g_stop = 0;
 static ABSystemDefaultIO *g_streamingSystemIO = nil;
 static ABPassThroughEngine *g_streamingPassEngine = nil;
 static ABStdoutPCMWriter *g_streamingPCMWriter = nil;
+
+@interface ABRecoveryRuntimeContext : NSObject
+@property(nonatomic, assign) BOOL active;
+@property(nonatomic, copy) NSString *triggerSource;
+@property(nonatomic, assign) NSUInteger attemptBase;
+@property(nonatomic, assign) NSUInteger retryDelayCount;
+@property(nonatomic, assign) NSTimeInterval lastDelaySeconds;
+@end
+
+@implementation ABRecoveryRuntimeContext
+@end
+
+@interface ABIntegrationFakeRecoveryEndpoint : NSObject <ABDeviceRecoveryEndpoint>
+@property(nonatomic, strong) NSMutableArray<NSNumber *> *rebuildOutcomes;
+@property(nonatomic, assign) BOOL active;
+@property(nonatomic, assign) NSUInteger recoveryRebuildAttemptCount;
+@property(nonatomic, copy, nullable) void (^onRebuild)(void);
+@end
+
+@implementation ABIntegrationFakeRecoveryEndpoint
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _rebuildOutcomes = [[NSMutableArray alloc] init];
+        _active = NO;
+        _recoveryRebuildAttemptCount = 0;
+    }
+    return self;
+}
+
+- (BOOL)ab_start:(NSError **)error {
+    (void)error;
+    self.active = YES;
+    return YES;
+}
+
+- (BOOL)ab_rebuild:(NSError **)error {
+    self.recoveryRebuildAttemptCount += 1;
+    if (self.onRebuild != nil) {
+        self.onRebuild();
+    }
+    BOOL shouldSucceed = YES;
+    if (self.rebuildOutcomes.count > 0) {
+        shouldSucceed = [self.rebuildOutcomes.firstObject boolValue];
+        [self.rebuildOutcomes removeObjectAtIndex:0];
+    }
+    if (!shouldSucceed && error != NULL) {
+        *error = [NSError errorWithDomain:@"ABIntegrationFakeRecoveryEndpoint"
+                                     code:1
+                                 userInfo:@{
+                                     NSLocalizedDescriptionKey : @"simulated rebuild failure",
+                                 }];
+    }
+    self.active = shouldSucceed;
+    return shouldSucceed;
+}
+
+- (void)ab_stop {
+    self.active = NO;
+}
+
+- (BOOL)ab_isActive {
+    return self.active;
+}
+
+@end
+
+static NSUInteger ABRuntimeRebuildAttemptCountForEndpoint(id endpoint) {
+    if ([endpoint respondsToSelector:@selector(recoveryRebuildAttemptCount)]) {
+        return (NSUInteger)[endpoint recoveryRebuildAttemptCount];
+    }
+    return 0;
+}
+
+static BOOL ABRunSharedRecoveryPipeline(ABDeviceRecoveryCoordinator *coordinator,
+                                        id<ABDeviceRecoveryEndpoint> endpoint,
+                                        ABRecoveryRuntimeContext *runtimeContext,
+                                        NSString *triggerSource,
+                                        NSError **error) {
+    runtimeContext.active = YES;
+    runtimeContext.triggerSource = triggerSource;
+    runtimeContext.retryDelayCount = 0;
+    runtimeContext.lastDelaySeconds = 0;
+    runtimeContext.attemptBase = ABRuntimeRebuildAttemptCountForEndpoint(endpoint);
+
+    const char *sourceUTF8 = triggerSource.UTF8String;
+    fprintf(stderr, "[audiobridge] recovery: trigger_source=%s state=begin\n",
+            sourceUTF8 != NULL ? sourceUTF8 : "unknown");
+
+    ABDeviceRecoveryResult result = [coordinator recoverAfterUnexpectedStopWithResult:error];
+    NSUInteger attempts = ABRuntimeRebuildAttemptCountForEndpoint(endpoint) - runtimeContext.attemptBase;
+    if (attempts == 0) {
+        attempts = 1;
+    }
+
+    if (result == ABDeviceRecoveryResultRecovered) {
+        fprintf(stderr,
+                "[audiobridge] recovery: trigger_source=%s state=streaming_restored attempt=%lu delay_count=%lu\n",
+                sourceUTF8 != NULL ? sourceUTF8 : "unknown",
+                (unsigned long)attempts,
+                (unsigned long)runtimeContext.retryDelayCount);
+    } else if (result == ABDeviceRecoveryResultCoalescedInFlight) {
+        fprintf(stderr,
+                "[audiobridge] recovery: trigger_source=%s state=coalesced_inflight attempt=%lu delay_count=%lu failure_summary=recovery already in flight\n",
+                sourceUTF8 != NULL ? sourceUTF8 : "unknown",
+                (unsigned long)attempts,
+                (unsigned long)runtimeContext.retryDelayCount);
+    } else if (result == ABDeviceRecoveryResultCompensationDisabled) {
+        fprintf(stderr,
+                "[audiobridge] recovery: trigger_source=%s state=failed attempt=%lu delay_count=%lu failure_summary=compensation disabled\n",
+                sourceUTF8 != NULL ? sourceUTF8 : "unknown",
+                (unsigned long)attempts,
+                (unsigned long)runtimeContext.retryDelayCount);
+    } else {
+        NSString *summary = error != NULL && *error != nil ? (*error).localizedDescription : @"rebuild failed";
+        const char *summaryUTF8 = summary.UTF8String;
+        fprintf(stderr,
+                "[audiobridge] recovery: trigger_source=%s state=failed attempt=%lu delay_count=%lu failure_summary=%s\n",
+                sourceUTF8 != NULL ? sourceUTF8 : "unknown",
+                (unsigned long)attempts,
+                (unsigned long)runtimeContext.retryDelayCount,
+                summaryUTF8 != NULL ? summaryUTF8 : "unknown");
+    }
+
+    runtimeContext.active = NO;
+    return result == ABDeviceRecoveryResultRecovered;
+}
+
+static int ABRunIntegrationRecoveryLifecycleScenario(void) {
+    ABIntegrationFakeRecoveryEndpoint *successEndpoint = [[ABIntegrationFakeRecoveryEndpoint alloc] init];
+    [successEndpoint.rebuildOutcomes addObjectsFromArray:@[ @NO, @YES ]];
+    ABRecoveryRuntimeContext *successContext = [[ABRecoveryRuntimeContext alloc] init];
+    ABDeviceRecoveryCoordinator *successCoordinator =
+        [[ABDeviceRecoveryCoordinator alloc] initWithEndpoint:successEndpoint
+                                                 sleepHandler:^(NSTimeInterval delaySeconds) {
+                                                     if (successContext.active) {
+                                                         successContext.retryDelayCount += 1;
+                                                         successContext.lastDelaySeconds = delaySeconds;
+                                                         const char *sourceUTF8 = successContext.triggerSource.UTF8String;
+                                                         fprintf(stderr,
+                                                                 "[audiobridge] recovery: trigger_source=%s attempt=%lu delay_seconds=%.1f state=retry_wait\n",
+                                                                 sourceUTF8 != NULL ? sourceUTF8 : "unknown",
+                                                                 (unsigned long)(successContext.retryDelayCount + 1),
+                                                                 delaySeconds);
+                                                     }
+                                                 }];
+
+    NSError *error = nil;
+    if (![successCoordinator startWithError:&error]) {
+        return 1;
+    }
+    __block ABDeviceRecoveryCoordinator *successCoordinatorBlock = successCoordinator;
+    __block ABIntegrationFakeRecoveryEndpoint *successEndpointBlock = successEndpoint;
+    __block ABRecoveryRuntimeContext *probeContext = [[ABRecoveryRuntimeContext alloc] init];
+    __block BOOL injectedCoalescedProbe = NO;
+    successEndpoint.onRebuild = ^{
+        if (injectedCoalescedProbe) {
+            return;
+        }
+        injectedCoalescedProbe = YES;
+        NSError *nestedError = nil;
+        (void)ABRunSharedRecoveryPipeline(successCoordinatorBlock, successEndpointBlock, probeContext,
+                                          @"listener_coalesced_probe", &nestedError);
+    };
+    if (!ABRunSharedRecoveryPipeline(successCoordinator, successEndpoint, successContext,
+                                     @"listener_default_change", &error)) {
+        return 1;
+    }
+
+    ABIntegrationFakeRecoveryEndpoint *failureEndpoint = [[ABIntegrationFakeRecoveryEndpoint alloc] init];
+    ABRecoveryRuntimeContext *failureContext = [[ABRecoveryRuntimeContext alloc] init];
+    ABDeviceRecoveryCoordinator *failureCoordinator =
+        [[ABDeviceRecoveryCoordinator alloc] initWithEndpoint:failureEndpoint
+                                                 sleepHandler:^(NSTimeInterval delaySeconds) {
+                                                     (void)delaySeconds;
+                                                 }];
+    error = nil;
+    (void)ABRunSharedRecoveryPipeline(failureCoordinator, failureEndpoint, failureContext, @"heartbeat_inactive",
+                                      &error);
+    return 0;
+}
 
 static void ABStreamingArmShutdownContext(ABSystemDefaultIO *systemIO, ABPassThroughEngine *passEngine,
                                           ABStdoutPCMWriter *pcmWriter) {
@@ -154,25 +337,44 @@ static int ABRunSpeakerStreaming(ABDeviceQuery *query, NSString *optInput, NSStr
     }
 
     ABPassThroughEngine *passEngine = [[ABPassThroughEngine alloc] init];
+    [passEngine configureRecoveryWithQuiet:quiet];
+    ABRecoveryRuntimeContext *runtimeContext = [[ABRecoveryRuntimeContext alloc] init];
+    ABDeviceRecoveryCoordinator *coordinator =
+        [[ABDeviceRecoveryCoordinator alloc] initWithEndpoint:passEngine
+                                                 sleepHandler:^(NSTimeInterval delaySeconds) {
+                                                     if (runtimeContext.active) {
+                                                         runtimeContext.retryDelayCount += 1;
+                                                         runtimeContext.lastDelaySeconds = delaySeconds;
+                                                         const char *sourceUTF8 = runtimeContext.triggerSource.UTF8String;
+                                                         fprintf(stderr,
+                                                                 "[audiobridge] recovery: trigger_source=%s attempt=%lu delay_seconds=%.1f state=retry_wait\n",
+                                                                 sourceUTF8 != NULL ? sourceUTF8 : "unknown",
+                                                                 (unsigned long)(runtimeContext.retryDelayCount + 1),
+                                                                 delaySeconds);
+                                                     }
+                                                     [NSThread sleepForTimeInterval:delaySeconds];
+                                                 }];
     ABStreamingArmShutdownContext(systemIO, passEngine, nil);
+
+    __block BOOL heartbeatPaused = NO;
+    __block ABDeviceRecoveryCoordinator *coordinatorBlock = coordinator;
+    __block ABPassThroughEngine *passEngineBlock = passEngine;
+    __block ABRecoveryRuntimeContext *runtimeContextBlock = runtimeContext;
 
     [systemIO registerForFloatingInput:floatingInput
                       floatingOutput:floatingOutput
                         rebuildBlock:^{
-                            NSError *rebuildError = nil;
-                            if (![passEngine rebuildForRouteChangeWithQuiet:quiet error:&rebuildError]) {
-                                NSString *message = rebuildError.localizedDescription ?: @"Engine rebuild failed.";
-                                const char *utf8 = message.UTF8String;
-                                fprintf(stderr, "%s\n", utf8 != NULL ? utf8 : "Engine rebuild failed.");
-                                ABShutdownStreaming();
-                                exit(1);
-                            }
+                            heartbeatPaused = YES;
+                            NSError *recoveryError = nil;
+                            (void)ABRunSharedRecoveryPipeline(coordinatorBlock, passEngineBlock, runtimeContextBlock,
+                                                              @"listener_default_change", &recoveryError);
+                            heartbeatPaused = NO;
                         }];
 
     ABSpeakerMaybeWarnBuiltInFeedback(query, inputPinned, resolvedInputID, outputPinned, resolvedOutputID, quiet);
 
     NSError *startError = nil;
-    if (![passEngine startWithQuiet:quiet error:&startError]) {
+    if (![coordinator startWithError:&startError]) {
         NSString *message = startError.localizedDescription ?: @"Engine start failed.";
         const char *utf8 = message.UTF8String;
         fprintf(stderr, "%s\n", utf8 != NULL ? utf8 : "Engine start failed.");
@@ -191,12 +393,28 @@ static int ABRunSpeakerStreaming(ABDeviceQuery *query, NSString *optInput, NSStr
                                                   block:^(__unused NSTimer *timer) {
                                                   }];
     [[NSRunLoop mainRunLoop] addTimer:wakeTimer forMode:NSRunLoopCommonModes];
+    NSTimer *heartbeatTimer = [NSTimer timerWithTimeInterval:0.5
+                                                     repeats:YES
+                                                       block:^(__unused NSTimer *timer) {
+                                                           if (heartbeatPaused) {
+                                                               return;
+                                                           }
+                                                           if (![passEngineBlock ab_isActive]) {
+                                                               NSError *recoveryError = nil;
+                                                               (void)ABRunSharedRecoveryPipeline(
+                                                                   coordinatorBlock, passEngineBlock,
+                                                                   runtimeContextBlock, @"heartbeat_inactive",
+                                                                   &recoveryError);
+                                                           }
+                                                       }];
+    [[NSRunLoop mainRunLoop] addTimer:heartbeatTimer forMode:NSRunLoopCommonModes];
 
     while (!g_stop) {
         [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode
                             beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.5]];
     }
 
+    [heartbeatTimer invalidate];
     [wakeTimer invalidate];
     ABShutdownStreaming();
     return 0;
@@ -245,10 +463,27 @@ static int ABRunStdoutPCMStreaming(NSString *optInput, UInt32 resolvedInputID, N
     }
 
     ABStdoutPCMWriter *pcmWriter = [[ABStdoutPCMWriter alloc] initWithStdoutFile:stdout];
+    [pcmWriter configureRecoveryWithTargetSampleRateHz:targetSampleRateHz quiet:quiet];
+    ABRecoveryRuntimeContext *runtimeContext = [[ABRecoveryRuntimeContext alloc] init];
+    ABDeviceRecoveryCoordinator *coordinator =
+        [[ABDeviceRecoveryCoordinator alloc] initWithEndpoint:pcmWriter
+                                                 sleepHandler:^(NSTimeInterval delaySeconds) {
+                                                     if (runtimeContext.active) {
+                                                         runtimeContext.retryDelayCount += 1;
+                                                         runtimeContext.lastDelaySeconds = delaySeconds;
+                                                         const char *sourceUTF8 = runtimeContext.triggerSource.UTF8String;
+                                                         fprintf(stderr,
+                                                                 "[audiobridge] recovery: trigger_source=%s attempt=%lu delay_seconds=%.1f state=retry_wait\n",
+                                                                 sourceUTF8 != NULL ? sourceUTF8 : "unknown",
+                                                                 (unsigned long)(runtimeContext.retryDelayCount + 1),
+                                                                 delaySeconds);
+                                                     }
+                                                     [NSThread sleepForTimeInterval:delaySeconds];
+                                                 }];
     ABStreamingArmShutdownContext(systemIO, nil, pcmWriter);
 
     NSError *startError = nil;
-    if (![pcmWriter startWithTargetSampleRateHz:targetSampleRateHz quiet:quiet error:&startError]) {
+    if (![coordinator startWithError:&startError]) {
         NSString *message = startError.localizedDescription ?: @"PCM stdout engine start failed.";
         const char *utf8 = message.UTF8String;
         fprintf(stderr, "%s\n", utf8 != NULL ? utf8 : "PCM stdout engine start failed.");
@@ -256,21 +491,20 @@ static int ABRunStdoutPCMStreaming(NSString *optInput, UInt32 resolvedInputID, N
         return 1;
     }
 
+    __block BOOL heartbeatPaused = NO;
+    __block ABDeviceRecoveryCoordinator *coordinatorBlock = coordinator;
+    __block ABStdoutPCMWriter *pcmWriterBlock = pcmWriter;
+    __block ABRecoveryRuntimeContext *runtimeContextBlock = runtimeContext;
+
     if (registerDefaultInputListener) {
         [systemIO registerForFloatingInput:YES
                           floatingOutput:NO
                             rebuildBlock:^{
-                                NSError *rebuildError = nil;
-                                if (![pcmWriter rebuildForRouteChangeWithTargetSampleRateHz:targetSampleRateHz
-                                                                                     quiet:quiet
-                                                                                     error:&rebuildError]) {
-                                    NSString *message =
-                                        rebuildError.localizedDescription ?: @"PCM stdout engine rebuild failed.";
-                                    const char *utf8 = message.UTF8String;
-                                    fprintf(stderr, "%s\n", utf8 != NULL ? utf8 : "PCM stdout engine rebuild failed.");
-                                    ABShutdownStreaming();
-                                    exit(1);
-                                }
+                                heartbeatPaused = YES;
+                                NSError *recoveryError = nil;
+                                (void)ABRunSharedRecoveryPipeline(coordinatorBlock, pcmWriterBlock, runtimeContextBlock,
+                                                                  @"listener_default_change", &recoveryError);
+                                heartbeatPaused = NO;
                             }];
     }
 
@@ -285,12 +519,28 @@ static int ABRunStdoutPCMStreaming(NSString *optInput, UInt32 resolvedInputID, N
                                                   block:^(__unused NSTimer *timer) {
                                                   }];
     [[NSRunLoop mainRunLoop] addTimer:wakeTimer forMode:NSRunLoopCommonModes];
+    NSTimer *heartbeatTimer = [NSTimer timerWithTimeInterval:0.5
+                                                     repeats:YES
+                                                       block:^(__unused NSTimer *timer) {
+                                                           if (heartbeatPaused) {
+                                                               return;
+                                                           }
+                                                           if (![pcmWriterBlock ab_isActive]) {
+                                                               NSError *recoveryError = nil;
+                                                               (void)ABRunSharedRecoveryPipeline(
+                                                                   coordinatorBlock, pcmWriterBlock,
+                                                                   runtimeContextBlock, @"heartbeat_inactive",
+                                                                   &recoveryError);
+                                                           }
+                                                       }];
+    [[NSRunLoop mainRunLoop] addTimer:heartbeatTimer forMode:NSRunLoopCommonModes];
 
     while (!g_stop) {
         [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode
                             beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.5]];
     }
 
+    [heartbeatTimer invalidate];
     [wakeTimer invalidate];
     ABShutdownStreaming();
     return 0;
@@ -301,7 +551,7 @@ static int ABRunStdoutPCMStreaming(NSString *optInput, UInt32 resolvedInputID, N
 
 NSString *const ABArgumentsErrorDomain = @"ABArgumentsError";
 
-enum { AB_OPT_LIST_ALL = 256 };
+enum { AB_OPT_LIST_ALL = 256, AB_OPT_INTEGRATION_RECOVERY_LIFECYCLE = 257 };
 
 NSArray<NSString *> *ABArgumentsFromArgcArgv(int argc, const char **argv, NSError **outError) {
     if (argc < 0 || argv == NULL) {
@@ -386,8 +636,8 @@ static void ABFreeCArgv(char **cargv, NSUInteger count) {
 
 /// Parses options into out-parameters. On failure prints to stderr and returns a non-zero exit code (2).
 static int ABParseOptionsFromArguments(NSArray<NSString *> *arguments, BOOL *outWantHelp, BOOL *outListAll,
-                                       BOOL *outForce, BOOL *outQuiet, NSString *__autoreleasing *outOptInput,
-                                       NSString *__autoreleasing *outOptOutput,
+                                       BOOL *outIntegrationRecoveryLifecycle, BOOL *outForce, BOOL *outQuiet,
+                                       NSString *__autoreleasing *outOptInput, NSString *__autoreleasing *outOptOutput,
                                        NSString *__autoreleasing *outOptRate) {
     NSUInteger argc = 0;
     char **cargv = ABCopyNSStringArrayToCArgv(arguments, &argc);
@@ -401,6 +651,7 @@ static int ABParseOptionsFromArguments(NSArray<NSString *> *arguments, BOOL *out
 
     BOOL wantHelp = NO;
     BOOL listAll = NO;
+    BOOL integrationRecoveryLifecycle = NO;
     BOOL force = NO;
     BOOL quiet = NO;
     NSString *optInput = nil;
@@ -415,6 +666,7 @@ static int ABParseOptionsFromArguments(NSArray<NSString *> *arguments, BOOL *out
         {"rate", required_argument, NULL, 'r'},
         {"quiet", no_argument, NULL, 'q'},
         {"list-all", no_argument, NULL, AB_OPT_LIST_ALL},
+        {"integration-recovery-lifecycle", no_argument, NULL, AB_OPT_INTEGRATION_RECOVERY_LIFECYCLE},
         {NULL, 0, NULL, 0},
     };
 
@@ -442,6 +694,9 @@ static int ABParseOptionsFromArguments(NSArray<NSString *> *arguments, BOOL *out
             case AB_OPT_LIST_ALL:
                 listAll = YES;
                 break;
+            case AB_OPT_INTEGRATION_RECOVERY_LIFECYCLE:
+                integrationRecoveryLifecycle = YES;
+                break;
             case '?':
             default:
                 fprintf(stderr, "audiobridge: unknown or invalid option.\n");
@@ -460,6 +715,7 @@ static int ABParseOptionsFromArguments(NSArray<NSString *> *arguments, BOOL *out
 
     *outWantHelp = wantHelp;
     *outListAll = listAll;
+    *outIntegrationRecoveryLifecycle = integrationRecoveryLifecycle;
     *outForce = force;
     *outQuiet = quiet;
     *outOptInput = optInput;
@@ -485,8 +741,15 @@ static void ABPrintUsageToFile(FILE *fp) {
 }
 
 /// Returns 0 if OK, 1 for `-r` misuse, 2 for invalid flag combinations.
-static int ABCliValidateCombinations(BOOL listAll, BOOL wantHelp, BOOL force, NSString *optInput,
-                                     NSString *optOutput, NSString *optRate) {
+static int ABCliValidateCombinations(BOOL listAll, BOOL wantHelp, BOOL integrationRecoveryLifecycle, BOOL force,
+                                     NSString *optInput, NSString *optOutput, NSString *optRate) {
+    if (integrationRecoveryLifecycle) {
+        if (listAll || wantHelp || force || optInput != nil || optOutput != nil || optRate != nil) {
+            return 2;
+        }
+        return 0;
+    }
+
     if (listAll) {
         if (wantHelp || force || optInput != nil || optOutput != nil || optRate != nil) {
             return 2;
@@ -527,21 +790,27 @@ int main(int argc, const char *argv[]) {
 
         BOOL wantHelp = NO;
         BOOL listAll = NO;
+        BOOL integrationRecoveryLifecycle = NO;
         BOOL force = NO;
         BOOL quiet = NO;
         NSString *optInput = nil;
         NSString *optOutput = nil;
         NSString *optRate = nil;
 
-        int parseExit = ABParseOptionsFromArguments(arguments, &wantHelp, &listAll, &force, &quiet, &optInput,
-                                                      &optOutput, &optRate);
+        int parseExit = ABParseOptionsFromArguments(arguments, &wantHelp, &listAll, &integrationRecoveryLifecycle,
+                                                    &force, &quiet, &optInput, &optOutput, &optRate);
         if (parseExit != 0) {
             return parseExit;
         }
 
-        int combo = ABCliValidateCombinations(listAll, wantHelp, force, optInput, optOutput, optRate);
+        int combo = ABCliValidateCombinations(listAll, wantHelp, integrationRecoveryLifecycle, force, optInput,
+                                              optOutput, optRate);
         if (combo != 0) {
             return combo;
+        }
+
+        if (integrationRecoveryLifecycle) {
+            return ABRunIntegrationRecoveryLifecycleScenario();
         }
 
         if (listAll) {

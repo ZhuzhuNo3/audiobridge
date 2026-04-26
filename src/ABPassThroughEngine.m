@@ -8,6 +8,26 @@
 
 NSString *const ABPassThroughEngineErrorDomain = @"ABPassThroughEngineError";
 
+static NSError *ABPassThroughBuildAdapterError(NSInteger code, NSString *operation, NSString *message) {
+    return [NSError errorWithDomain:ABPassThroughEngineErrorDomain
+                               code:code
+                           userInfo:@{
+                               NSLocalizedDescriptionKey : message,
+                               @"operation" : operation,
+                           }];
+}
+
+static BOOL ABPassThroughEnsureStructuredErrorOnFailure(BOOL succeeded, NSError **error, NSInteger fallbackCode,
+                                                        NSString *operation, NSString *message) {
+    if (succeeded) {
+        return YES;
+    }
+    if (error != NULL && *error == nil) {
+        *error = ABPassThroughBuildAdapterError(fallbackCode, operation, message);
+    }
+    return NO;
+}
+
 static BOOL ABPassThroughGetDefaultOutputDevice(AudioDeviceID *outID) {
     AudioObjectPropertyAddress address = {
         .mSelector = kAudioHardwarePropertyDefaultOutputDevice,
@@ -115,6 +135,9 @@ static void ABPassThroughLogSpeakerPathDiagnostics(AVAudioEngine *engine, BOOL q
 
 @implementation ABPassThroughEngine {
     AVAudioEngine *_currentEngine;
+    NSUInteger _recoveryRebuildAttemptCount;
+    BOOL _configuredQuiet;
+    BOOL _hasConfiguredRuntimeParameters;
 }
 
 - (BOOL)ab_connectPrepareStartEngine:(AVAudioEngine *)engine error:(NSError **)error {
@@ -138,6 +161,8 @@ static void ABPassThroughLogSpeakerPathDiagnostics(AVAudioEngine *engine, BOOL q
 }
 
 - (BOOL)startWithQuiet:(BOOL)quiet error:(NSError **)error {
+    _configuredQuiet = quiet;
+    _hasConfiguredRuntimeParameters = YES;
     [self stop];
     AVAudioEngine *engine = [[AVAudioEngine alloc] init];
     if (![self ab_connectPrepareStartEngine:engine error:error]) {
@@ -146,6 +171,11 @@ static void ABPassThroughLogSpeakerPathDiagnostics(AVAudioEngine *engine, BOOL q
     _currentEngine = engine;
     ABPassThroughLogSpeakerPathDiagnostics(engine, quiet);
     return YES;
+}
+
+- (void)configureRecoveryWithQuiet:(BOOL)quiet {
+    _configuredQuiet = quiet;
+    _hasConfiguredRuntimeParameters = YES;
 }
 
 - (void)stop {
@@ -177,6 +207,33 @@ static void ABPassThroughLogSpeakerPathDiagnostics(AVAudioEngine *engine, BOOL q
     _currentEngine = engine;
     ABPassThroughLogSpeakerPathDiagnostics(engine, quiet);
     return YES;
+}
+
+- (BOOL)ab_start:(NSError **)error {
+    BOOL quiet = _hasConfiguredRuntimeParameters ? _configuredQuiet : NO;
+    BOOL started = [self startWithQuiet:quiet error:error];
+    return ABPassThroughEnsureStructuredErrorOnFailure(started, error, 1001, @"ab_start",
+                                                       @"Pass-through adapter start failed.");
+}
+
+- (BOOL)ab_rebuild:(NSError **)error {
+    _recoveryRebuildAttemptCount += 1;
+    BOOL quiet = _hasConfiguredRuntimeParameters ? _configuredQuiet : NO;
+    BOOL rebuilt = [self rebuildForRouteChangeWithQuiet:quiet error:error];
+    return ABPassThroughEnsureStructuredErrorOnFailure(rebuilt, error, 1002, @"ab_rebuild",
+                                                       @"Pass-through adapter rebuild failed.");
+}
+
+- (void)ab_stop {
+    [self stop];
+}
+
+- (BOOL)ab_isActive {
+    return _currentEngine != nil;
+}
+
+- (NSUInteger)recoveryRebuildAttemptCount {
+    return _recoveryRebuildAttemptCount;
 }
 
 @end

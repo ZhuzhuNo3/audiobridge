@@ -6,21 +6,46 @@
 #import <stdio.h>
 #import <stdlib.h>
 
-extern void ABShutdownStreaming(void);
-
 NSString *const ABStdoutPCMWriterErrorDomain = @"ABStdoutPCMWriterError";
+
+static NSError *ABStdoutBuildAdapterError(NSInteger code, NSString *operation, NSString *message) {
+    return [NSError errorWithDomain:ABStdoutPCMWriterErrorDomain
+                               code:code
+                           userInfo:@{
+                               NSLocalizedDescriptionKey : message,
+                               @"operation" : operation,
+                           }];
+}
+
+static BOOL ABStdoutEnsureStructuredErrorOnFailure(BOOL succeeded, NSError **error, NSInteger fallbackCode,
+                                                   NSString *operation, NSString *message) {
+    if (succeeded) {
+        return YES;
+    }
+    if (error != NULL && *error == nil) {
+        *error = ABStdoutBuildAdapterError(fallbackCode, operation, message);
+    }
+    return NO;
+}
 
 @implementation ABStdoutPCMWriter {
     FILE *_stdoutFile;
     AVAudioEngine *_engine;
     AVAudioConverter *_converter;
     AVAudioFormat *_destinationFormat;
+    double _configuredTargetSampleRateHz;
+    BOOL _configuredQuiet;
+    BOOL _hasConfiguredRuntimeParameters;
+    NSUInteger _recoveryRebuildAttemptCount;
 }
 
 - (instancetype)initWithStdoutFile:(FILE *)stdoutFile {
     self = [super init];
     if (self) {
         _stdoutFile = stdoutFile;
+        _configuredTargetSampleRateHz = 0;
+        _configuredQuiet = NO;
+        _hasConfiguredRuntimeParameters = NO;
     }
     return self;
 }
@@ -66,8 +91,7 @@ NSString *const ABStdoutPCMWriterErrorDomain = @"ABStdoutPCMWriterError";
     if (outputBuffer == nil) {
         dispatch_async(dispatch_get_main_queue(), ^{
             fprintf(stderr, "audiobridge: failed to allocate PCM output buffer.\n");
-            ABShutdownStreaming();
-            exit(1);
+            [self stop];
         });
         return;
     }
@@ -92,8 +116,7 @@ NSString *const ABStdoutPCMWriterErrorDomain = @"ABStdoutPCMWriterError";
             NSString *message = convertError.localizedDescription ?: @"PCM conversion failed.";
             const char *utf8 = message.UTF8String;
             fprintf(stderr, "audiobridge: %s\n", utf8 != NULL ? utf8 : "PCM conversion failed.");
-            ABShutdownStreaming();
-            exit(1);
+            [self stop];
         });
         return;
     }
@@ -108,8 +131,7 @@ NSString *const ABStdoutPCMWriterErrorDomain = @"ABStdoutPCMWriterError";
     if (samples == NULL) {
         dispatch_async(dispatch_get_main_queue(), ^{
             fprintf(stderr, "audiobridge: unexpected non-interleaved PCM layout.\n");
-            ABShutdownStreaming();
-            exit(1);
+            [self stop];
         });
         return;
     }
@@ -118,13 +140,25 @@ NSString *const ABStdoutPCMWriterErrorDomain = @"ABStdoutPCMWriterError";
     if (written != bytes) {
         dispatch_async(dispatch_get_main_queue(), ^{
             fprintf(stderr, "audiobridge: stdout write failed.\n");
-            ABShutdownStreaming();
-            exit(1);
+            [self stop];
         });
     }
 }
 
 - (BOOL)startWithTargetSampleRateHz:(double)targetSampleRateHz quiet:(BOOL)quiet error:(NSError **)error {
+    _configuredTargetSampleRateHz = targetSampleRateHz;
+    _configuredQuiet = quiet;
+    _hasConfiguredRuntimeParameters = YES;
+    return [self ab_startEngineWithTargetSampleRateHz:targetSampleRateHz quiet:quiet error:error];
+}
+
+- (void)configureRecoveryWithTargetSampleRateHz:(double)targetSampleRateHz quiet:(BOOL)quiet {
+    _configuredTargetSampleRateHz = targetSampleRateHz;
+    _configuredQuiet = quiet;
+    _hasConfiguredRuntimeParameters = YES;
+}
+
+- (BOOL)ab_startEngineWithTargetSampleRateHz:(double)targetSampleRateHz quiet:(BOOL)quiet error:(NSError **)error {
     [self stop];
 
     AVAudioEngine *engine = [[AVAudioEngine alloc] init];
@@ -209,6 +243,36 @@ NSString *const ABStdoutPCMWriterErrorDomain = @"ABStdoutPCMWriterError";
                                                error:(NSError **)error {
     [self stop];
     return [self startWithTargetSampleRateHz:targetSampleRateHz quiet:quiet error:error];
+}
+
+- (BOOL)ab_start:(NSError **)error {
+    double targetSampleRateHz = _hasConfiguredRuntimeParameters ? _configuredTargetSampleRateHz : 0;
+    BOOL quiet = _hasConfiguredRuntimeParameters ? _configuredQuiet : NO;
+    BOOL started = [self startWithTargetSampleRateHz:targetSampleRateHz quiet:quiet error:error];
+    return ABStdoutEnsureStructuredErrorOnFailure(started, error, 1001, @"ab_start",
+                                                  @"Stdout PCM adapter start failed.");
+}
+
+- (BOOL)ab_rebuild:(NSError **)error {
+    _recoveryRebuildAttemptCount += 1;
+    double targetSampleRateHz = _hasConfiguredRuntimeParameters ? _configuredTargetSampleRateHz : 0;
+    BOOL quiet = _hasConfiguredRuntimeParameters ? _configuredQuiet : NO;
+    BOOL rebuilt =
+        [self rebuildForRouteChangeWithTargetSampleRateHz:targetSampleRateHz quiet:quiet error:error];
+    return ABStdoutEnsureStructuredErrorOnFailure(rebuilt, error, 1002, @"ab_rebuild",
+                                                  @"Stdout PCM adapter rebuild failed.");
+}
+
+- (void)ab_stop {
+    [self stop];
+}
+
+- (BOOL)ab_isActive {
+    return _engine != nil;
+}
+
+- (NSUInteger)recoveryRebuildAttemptCount {
+    return _recoveryRebuildAttemptCount;
 }
 
 @end

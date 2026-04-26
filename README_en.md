@@ -25,6 +25,16 @@ make
 
 Run `./build/audiobridge --help` for all flags.
 
+## Runtime semantics
+
+- Startup uses strict-exit semantics: if the first pipeline start fails, the process exits without retry loops.
+- Runtime compensation is enabled only after the first successful startup, and then unexpected stops can trigger rebuild retries.
+- Default-device listener notifications are debounced with an 80 ms quiet window, so bursty route flips are coalesced into one recovery trigger.
+
+## Verification
+
+- `sh tests/run_all.sh` always runs `make -s test-unit`; it runs `xcodebuild test -scheme audiobridge-tests` only when `xcodebuild` is present and usable, otherwise prints a deterministic skip reason and continues.
+
 ## License
 
 [MIT](LICENSE)

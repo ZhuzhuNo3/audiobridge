@@ -25,6 +25,16 @@ make
 
 完整选项见 `./build/audiobridge --help`。
 
+## 运行期语义
+
+- 启动阶段采用严格退出语义：首次管线启动失败时，进程直接退出，不进入重试循环。
+- 仅在首次启动成功后才启用运行期补偿，此后遇到意外中断才会触发重建重试。
+- 默认设备监听事件采用 80 ms 静默窗口防抖，突发路由抖动会被合并为一次恢复触发。
+
+## 验证
+
+- `sh tests/run_all.sh` 始终执行 `make -s test-unit`；仅在 `xcodebuild` 存在且可用时执行 `xcodebuild test -scheme audiobridge-tests` 并要求通过，否则输出确定性的 skip 原因并继续以 `make/test-unit` 路径作为证据。
+
 ## 许可
 
 [MIT](LICENSE)

@@ -161,9 +161,10 @@ static OSStatus ABSystemDefaultIOHardwareDefaultListener(AudioObjectID objectID,
                            if (atomic_load_explicit(&_debounceGeneration, memory_order_relaxed) != token) {
                                return;
                            }
-                           void (^block)(void) = _debounceRebuildBlock;
-                           if (block) {
-                               block();
+                           // Runtime wiring owns recovery semantics; this callback only signals "route changed".
+                           void (^listenerBlock)(void) = _debounceRebuildBlock;
+                           if (listenerBlock) {
+                               listenerBlock();
                            }
                        });
     });
