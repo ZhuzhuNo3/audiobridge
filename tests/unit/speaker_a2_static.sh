@@ -238,15 +238,15 @@ if [ ! -f "$HAL" ] || [ ! -f "$HALH" ]; then
     echo "missing ABHALPassThroughIO module for Aggregate I/O" >&2
     exit 1
 fi
-rg -q 'kAudioUnitSubType_HALOutput' "$HAL" || exit 1
-rg -q 'deviceIsAggregate' "$HAL" || exit 1
-rg -q 'saveAndSet|setDefaultInput|setDefaultOutput' "$HAL" && exit 1
+grep -Eq 'kAudioUnitSubType_HALOutput' "$HAL" || exit 1
+grep -Eq 'deviceIsAggregate' "$HAL" || exit 1
+grep -Eq 'saveAndSet|setDefaultInput|setDefaultOutput' "$HAL" && exit 1
 # Engine must gate Aggregate → HAL (not AVAudioEngine warm/restart which fails -10875).
-if ! rg -q 'deviceIsAggregate' "$ENG"; then
+if ! grep -Eq 'deviceIsAggregate' "$ENG"; then
     echo "ABPassThroughEngine must route Aggregate via ABHALPassThroughIO" >&2
     exit 1
 fi
-if ! rg -q 'ab_startHALPassThroughWithError|ABHALPassThroughIO' "$ENG"; then
+if ! grep -Eq 'ab_startHALPassThroughWithError|ABHALPassThroughIO' "$ENG"; then
     echo "ABPassThroughEngine missing HAL Aggregate start path" >&2
     exit 1
 fi
@@ -407,9 +407,9 @@ assert_hal_only_gate("rebuildForRouteChangeWithQuiet", rebuild_body)
 print("speaker_a2_static: Aggregate HAL gate ok (start+rebuild, no AV fall-through)")
 PY
 
-rg -q 'shouldBindDirectlyWithInputDeviceID' "$AGG" || exit 1
-rg -q 'boundDeviceID' "$ENG" || exit 1
-rg -q 'saveAndSet|setDefaultInput|setDefaultOutput' "$AGG" && exit 1
-rg -q 'saveAndSet|setDefaultInput|setDefaultOutput' "$ENG" && exit 1
+grep -Eq 'shouldBindDirectlyWithInputDeviceID' "$AGG" || exit 1
+grep -Eq 'boundDeviceID' "$ENG" || exit 1
+grep -Eq 'saveAndSet|setDefaultInput|setDefaultOutput' "$AGG" && exit 1
+grep -Eq 'saveAndSet|setDefaultInput|setDefaultOutput' "$ENG" && exit 1
 echo "speaker_a2_static: ok"
 exit 0
