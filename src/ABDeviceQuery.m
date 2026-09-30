@@ -104,6 +104,21 @@ static NSString *ABCopyDeviceName(AudioObjectID deviceID) {
     return (__bridge_transfer NSString *)nameRef;
 }
 
+static NSString *ABCopyDeviceUID(AudioObjectID deviceID) {
+    AudioObjectPropertyAddress address = {
+        .mSelector = kAudioDevicePropertyDeviceUID,
+        .mScope = kAudioObjectPropertyScopeGlobal,
+        .mElement = kAudioObjectPropertyElementMain,
+    };
+    CFStringRef uidRef = NULL;
+    UInt32 dataSize = (UInt32)sizeof(uidRef);
+    OSStatus status = AudioObjectGetPropertyData(deviceID, &address, 0, NULL, &dataSize, &uidRef);
+    if (status != noErr || uidRef == NULL) {
+        return nil;
+    }
+    return (__bridge_transfer NSString *)uidRef;
+}
+
 static void ABFprintDeviceLine(FILE *fp, UInt32 deviceID, NSString *name) {
     fprintf(fp, "%u\t", (unsigned int)deviceID);
     const char *utf8 = name.length > 0 ? name.UTF8String : "";
@@ -281,6 +296,10 @@ static BOOL ABResolveSpecifierAgainstDevices(NSArray<ABListedDevice *> *devices,
     return ABCopyDeviceName(deviceID);
 }
 
++ (NSString *)deviceUIDForAudioDeviceID:(AudioDeviceID)deviceID {
+    return ABCopyDeviceUID(deviceID);
+}
+
 + (void)printDevicePreviewToFile:(FILE *)fp maxInputs:(NSUInteger)maxIn maxOutputs:(NSUInteger)maxOut {
     ABDeviceQuery *query = [[ABDeviceQuery alloc] init];
     [query refresh];
@@ -336,6 +355,23 @@ static BOOL ABResolveSpecifierAgainstDevices(NSArray<ABListedDevice *> *devices,
     }
     *isStdout = NO;
     return ABResolveSpecifierAgainstDevices(_outputCapableDevices, string, @"output", outDeviceID, error);
+}
+
+- (BOOL)resolveUID:(NSString *)uid
+     amongInputCapable:(BOOL)amongInputCapable
+          intoDeviceID:(UInt32 *)outDeviceID {
+    if (uid.length == 0 || outDeviceID == NULL) {
+        return NO;
+    }
+    NSArray<ABListedDevice *> *devices = amongInputCapable ? _inputCapableDevices : _outputCapableDevices;
+    for (ABListedDevice *device in devices) {
+        NSString *deviceUID = ABCopyDeviceUID(device.deviceID);
+        if (deviceUID != nil && [deviceUID isEqualToString:uid]) {
+            *outDeviceID = device.deviceID;
+            return YES;
+        }
+    }
+    return NO;
 }
 
 @end

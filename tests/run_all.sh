@@ -15,7 +15,7 @@ if command -v xcodebuild >/dev/null 2>&1 && xcodebuild -version >/dev/null 2>&1 
 else
     echo "[tests/run_all] skip xcodebuild test: xcodebuild unavailable/unusable or no xcodeproj in repository" >&2
 fi
-for name in cli_help_list.sh cli_resolve_errors.sh integration/recovery_lifecycle.sh; do
+for name in cli_help_list.sh cli_resolve_errors.sh integration/recovery_lifecycle.sh unit/speaker_a2_static.sh; do
     sh "$ROOT/tests/$name" || failed=1
 done
 exit "$failed"

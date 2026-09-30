@@ -44,6 +44,9 @@ typedef NS_ENUM(NSInteger, ABDeviceQueryErrorCode) {
 /// Core Audio device name for `deviceID`, or a short fallback string if the query fails.
 + (NSString *)deviceNameForAudioDeviceID:(AudioDeviceID)deviceID;
 
+/// Core Audio Device UID for `deviceID`, or nil if the property cannot be read.
++ (nullable NSString *)deviceUIDForAudioDeviceID:(AudioDeviceID)deviceID;
+
 /// Resolves `-i` / `--input` value per design **Value resolution** using the current `inputCapableDevices` (call `refresh` first). `-` is invalid.
 - (BOOL)resolveInputString:(NSString *)string
             intoDeviceID:(UInt32 *)outDeviceID
@@ -54,6 +57,11 @@ typedef NS_ENUM(NSInteger, ABDeviceQueryErrorCode) {
              intoDeviceID:(UInt32 *)outDeviceID
                    isStdout:(BOOL *)isStdout
                       error:(NSError * _Nullable *)error;
+
+/// Finds a current hardware device whose Device UID equals `uid` among input-capable (or output-capable) lists. Call `refresh` first.
+- (BOOL)resolveUID:(NSString *)uid
+     amongInputCapable:(BOOL)amongInputCapable
+          intoDeviceID:(UInt32 *)outDeviceID;
 
 @end
 
