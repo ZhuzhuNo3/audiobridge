@@ -22,6 +22,7 @@ make
 | Default input → default output (needs `-f`) | `audiobridge -f` |
 | List devices | `audiobridge --list-all` |
 | PCM to stdout | `audiobridge -i "name" -o -` (optional `-r 48000`) |
+| Speaker DEBUG event stream | `audiobridge -d -f` (`-q` overrides `-d`; fully silent) |
 
 Run `./build/audiobridge --help` for all flags.
 
@@ -29,7 +30,11 @@ Run `./build/audiobridge --help` for all flags.
 
 - Startup uses strict-exit semantics: if the first pipeline start fails, the process exits without retry loops.
 - Runtime compensation is enabled only after the first successful startup, and then unexpected stops can trigger rebuild retries.
-- Default-device listener notifications are debounced with an 80 ms quiet window, so bursty route flips are coalesced into one recovery trigger.
+- Configured speaker devices bind via Aggregate / same-device duplex `CurrentDevice`; the process **does not rewrite system defaults** just to start audio. Aggregate or bind failures exit with an observable error.
+- When a configured endpoint is temporarily unavailable, the process enters a config-wait state (engine stopped) and does not treat that inactive state as recovery/source switching; `main` reattaches when the endpoint returns.
+- When an unspecified endpoint follows a system-default change, `main` rebuilds Aggregate/binding (not endpoint-only rebuild).
+- Default-device listener notifications are debounced with an 80 ms quiet window so bursty route flips coalesce.
+- Runtime logs use `YYYY-MM-DD HH:MM:SS.mmm  FILE:LINE  LEVEL  message`. `-d` enables the DEBUG event stream; `-q` / `--quiet` **overrides** `-d` and silences all runtime logs. There is no 30s periodic snapshot.
 
 ## Verification
 
