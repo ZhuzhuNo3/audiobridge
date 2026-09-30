@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 
+#import "ABDiagSnapshot.h"
 #import "ABSystemDefaultIO.h"
 
 @interface ABSystemDefaultIO (ABTestingHooks)
@@ -74,11 +75,43 @@ static int ABTestRemoveAllListenersCancelsPendingDebouncedCallback(void) {
     return 0;
 }
 
+static int ABTestDiagEnabledDoesNotChangeCoalescingCount(void) {
+    ABSystemDefaultIO *io = [[ABSystemDefaultIO alloc] init];
+    io.diagEnabled = YES;
+    ABDiagSetEnabled(YES);
+    __block NSUInteger callbackCount = 0;
+    [io registerForFloatingInput:YES
+                  floatingOutput:NO
+                    rebuildBlock:^{
+                        callbackCount += 1;
+                    }];
+
+    [io ab_enqueueDebouncedRebuildForDefaultDeviceChange];
+    ABSpinMainRunLoopFor(0.03);
+    [io ab_enqueueDebouncedRebuildForDefaultDeviceChange];
+    ABSpinMainRunLoopFor(0.03);
+    [io ab_enqueueDebouncedRebuildForDefaultDeviceChange];
+    ABSpinMainRunLoopFor(0.15);
+
+    if (callbackCount != 1) {
+        fprintf(stderr, "diag-enabled path expected one coalesced callback, got %lu\n",
+                (unsigned long)callbackCount);
+        [io removeAllListeners];
+        ABDiagSetEnabled(NO);
+        return 1;
+    }
+
+    [io removeAllListeners];
+    ABDiagSetEnabled(NO);
+    return 0;
+}
+
 int main(void) {
     @autoreleasepool {
         int failed = 0;
         failed |= ABTestDebounceCoalescesBurstsWithinEightyMilliseconds();
         failed |= ABTestRemoveAllListenersCancelsPendingDebouncedCallback();
+        failed |= ABTestDiagEnabledDoesNotChangeCoalescingCount();
         if (failed != 0) {
             fprintf(stderr, "ABSystemDefaultIODebounceTests failed\n");
         }

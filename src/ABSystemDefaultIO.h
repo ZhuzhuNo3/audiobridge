@@ -19,6 +19,13 @@ FOUNDATION_EXPORT NSString *const ABSystemDefaultIOErrorDomain;
 @property (nonatomic, readonly) BOOL didChangeInput;
 @property (nonatomic, readonly) BOOL didChangeOutput;
 
+/// Whether floating default-device listeners are currently registered.
+@property (nonatomic, readonly) BOOL floatingInputListenerRegistered;
+@property (nonatomic, readonly) BOOL floatingOutputListenerRegistered;
+
+/// When YES, emits thin DEBUG listener/debounce events. Default NO.
+@property (nonatomic, assign) BOOL diagEnabled;
+
 /// Saves the current default input, then sets the system default to `deviceID` when it differs.
 - (BOOL)saveAndSetInput:(AudioDeviceID)deviceID error:(NSError * _Nullable *)error;
 /// Saves the current default output, then sets the system default to `deviceID` when it differs.

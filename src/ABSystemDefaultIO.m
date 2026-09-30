@@ -1,5 +1,7 @@
 #import "ABSystemDefaultIO.h"
 
+#import "ABDiagSnapshot.h"
+
 #import <dispatch/dispatch.h>
 #import <stdatomic.h>
 
@@ -63,6 +65,7 @@ static BOOL ABSystemDefaultIOSetDefaultDevice(AudioObjectPropertySelector select
 @property (nonatomic, readwrite) BOOL didChangeInput;
 @property (nonatomic, readwrite) BOOL didChangeOutput;
 - (void)ab_enqueueDebouncedRebuildForDefaultDeviceChange;
+- (void)ab_enqueueDebouncedRebuildForDefaultDeviceChangeWithSelector:(AudioObjectPropertySelector)selector;
 @end
 
 static OSStatus ABSystemDefaultIOHardwareDefaultListener(AudioObjectID objectID,
@@ -70,10 +73,12 @@ static OSStatus ABSystemDefaultIOHardwareDefaultListener(AudioObjectID objectID,
                                                          const AudioObjectPropertyAddress *addresses,
                                                          void *clientData) {
     (void)objectID;
-    (void)addressCount;
-    (void)addresses;
     ABSystemDefaultIO *io = (__bridge ABSystemDefaultIO *)clientData;
-    [io ab_enqueueDebouncedRebuildForDefaultDeviceChange];
+    AudioObjectPropertySelector selector = 0;
+    if (addressCount > 0 && addresses != NULL) {
+        selector = addresses[0].mSelector;
+    }
+    [io ab_enqueueDebouncedRebuildForDefaultDeviceChangeWithSelector:selector];
     return noErr;
 }
 
@@ -153,14 +158,60 @@ static OSStatus ABSystemDefaultIOHardwareDefaultListener(AudioObjectID objectID,
     [self removeAllListeners];
 }
 
+- (BOOL)floatingInputListenerRegistered {
+    return _inputListenerRegistered;
+}
+
+- (BOOL)floatingOutputListenerRegistered {
+    return _outputListenerRegistered;
+}
+
+- (void)ab_diagThinIfEnabled:(NSString *)reason fields:(NSDictionary<NSString *, NSString *> *)fields {
+    if (!self.diagEnabled) {
+        return;
+    }
+    ABDiagEmitThinEvent(reason, fields);
+}
+
 - (void)ab_enqueueDebouncedRebuildForDefaultDeviceChange {
+    [self ab_enqueueDebouncedRebuildForDefaultDeviceChangeWithSelector:0];
+}
+
+- (void)ab_enqueueDebouncedRebuildForDefaultDeviceChangeWithSelector:(AudioObjectPropertySelector)selector {
+    if (self.diagEnabled && selector != 0) {
+        NSString *direction = @"unknown";
+        if (selector == kAudioHardwarePropertyDefaultInputDevice) {
+            direction = @"in";
+        } else if (selector == kAudioHardwarePropertyDefaultOutputDevice) {
+            direction = @"out";
+        }
+        [self ab_diagThinIfEnabled:@"ca_default_listener"
+                            fields:@{
+                                @"selector" : [NSString stringWithFormat:@"0x%08x", (unsigned int)selector],
+                                @"direction" : direction,
+                            }];
+    }
+
     uint64_t token = atomic_fetch_add_explicit(&_debounceGeneration, 1, memory_order_relaxed) + 1;
+    [self ab_diagThinIfEnabled:@"debounce_armed"
+                        fields:@{@"generation" : [NSString stringWithFormat:@"%llu", (unsigned long long)token]}];
+
     dispatch_async(dispatch_get_main_queue(), ^{
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * 0.08)),
                        dispatch_get_main_queue(), ^{
                            if (atomic_load_explicit(&_debounceGeneration, memory_order_relaxed) != token) {
+                               [self ab_diagThinIfEnabled:@"debounce_dropped"
+                                                   fields:@{
+                                                       @"generation" :
+                                                           [NSString stringWithFormat:@"%llu", (unsigned long long)token],
+                                                   }];
                                return;
                            }
+                           [self ab_diagThinIfEnabled:@"debounce_fire"
+                                               fields:@{
+                                                   @"generation" :
+                                                       [NSString stringWithFormat:@"%llu", (unsigned long long)token],
+                                               }];
                            // Runtime wiring owns recovery semantics; this callback only signals "route changed".
                            void (^listenerBlock)(void) = _debounceRebuildBlock;
                            if (listenerBlock) {
@@ -191,11 +242,14 @@ static OSStatus ABSystemDefaultIOHardwareDefaultListener(AudioObjectID objectID,
     };
 
     void *client = (__bridge void *)self;
+    BOOL inputOk = NO;
+    BOOL outputOk = NO;
     if (floatingInput) {
         if (AudioObjectAddPropertyListener(kAudioObjectSystemObject, &inputAddress,
                                              ABSystemDefaultIOHardwareDefaultListener,
                                              client) == noErr) {
             _inputListenerRegistered = YES;
+            inputOk = YES;
         }
     }
     if (floatingOutput) {
@@ -203,11 +257,22 @@ static OSStatus ABSystemDefaultIOHardwareDefaultListener(AudioObjectID objectID,
                                              ABSystemDefaultIOHardwareDefaultListener,
                                              client) == noErr) {
             _outputListenerRegistered = YES;
+            outputOk = YES;
         }
     }
+
+    [self ab_diagThinIfEnabled:@"listener_register"
+                        fields:@{
+                            @"floating_in" : floatingInput ? @"1" : @"0",
+                            @"floating_out" : floatingOutput ? @"1" : @"0",
+                            @"in_ok" : floatingInput ? (inputOk ? @"1" : @"0") : @"n/a",
+                            @"out_ok" : floatingOutput ? (outputOk ? @"1" : @"0") : @"n/a",
+                        }];
 }
 
 - (void)removeAllListeners {
+    BOOL hadAny = _inputListenerRegistered || _outputListenerRegistered || _debounceRebuildBlock != nil;
+
     AudioObjectPropertyAddress inputAddress = {
         .mSelector = kAudioHardwarePropertyDefaultInputDevice,
         .mScope = kAudioObjectPropertyScopeGlobal,
@@ -232,6 +297,10 @@ static OSStatus ABSystemDefaultIOHardwareDefaultListener(AudioObjectID objectID,
     }
     atomic_fetch_add_explicit(&_debounceGeneration, 1, memory_order_relaxed);
     _debounceRebuildBlock = nil;
+
+    if (hadAny) {
+        [self ab_diagThinIfEnabled:@"listener_remove" fields:@{@"ok" : @"1"}];
+    }
 }
 
 @end

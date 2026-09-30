@@ -156,12 +156,106 @@ static int ABTestContractRebuildPreservesStructuredUnderlyingError(void) {
     return 0;
 }
 
+static int ABTestContractIsActiveIsPointerNonNull(void) {
+    ABPassThroughEngineContractSpy *engine = [[ABPassThroughEngineContractSpy alloc] init];
+    if ([engine ab_isActive]) {
+        fprintf(stderr, "expected inactive with nil engine pointer\n");
+        return 1;
+    }
+    if (!ABSetPassThroughCurrentEngineForTest(engine, [[AVAudioEngine alloc] init])) {
+        return 1;
+    }
+    if (![engine ab_isActive]) {
+        fprintf(stderr, "expected ab_isActive true when _currentEngine non-nil\n");
+        return 1;
+    }
+    // Pointer non-null remains the sole ab_isActive rule even if the engine is not running.
+    if (!engine.ab_isActive) {
+        fprintf(stderr, "ab_isActive should ignore isRunning\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int ABTestContractRebuildSeqIncrementsOnSuccessfulStart(void) {
+    ABPassThroughEngine *engine = [[ABPassThroughEngine alloc] init];
+    [engine configureRecoveryWithQuiet:YES diag:YES];
+    NSUInteger before = engine.rebuildSeq;
+    NSError *error = nil;
+    BOOL started = [engine startWithQuiet:YES error:&error];
+    if (!started) {
+        // Environments without usable audio I/O may fail start; skip seq assertion then.
+        fprintf(stderr, "skip rebuild_seq start assertion: %s\n",
+                error.localizedDescription.UTF8String ?: "start failed");
+        [engine stop];
+        return 0;
+    }
+    if (engine.rebuildSeq != before + 1) {
+        fprintf(stderr, "expected rebuild_seq to increment on successful start (%lu -> %lu)\n",
+                (unsigned long)before, (unsigned long)engine.rebuildSeq);
+        [engine stop];
+        return 1;
+    }
+    if (![engine ab_isActive]) {
+        fprintf(stderr, "expected ab_isActive after successful start\n");
+        [engine stop];
+        return 1;
+    }
+    NSUInteger mid = engine.rebuildSeq;
+    if (![engine rebuildForRouteChangeWithQuiet:YES error:&error]) {
+        fprintf(stderr, "rebuild failed unexpectedly: %s\n", error.localizedDescription.UTF8String ?: "?");
+        [engine stop];
+        return 1;
+    }
+    if (engine.rebuildSeq != mid + 1) {
+        fprintf(stderr, "expected rebuild_seq to increment on successful rebuild\n");
+        [engine stop];
+        return 1;
+    }
+    [engine stop];
+    return 0;
+}
+
+static int ABTestContractInvalidBoundDeviceFailsStart(void) {
+    ABPassThroughEngine *engine = [[ABPassThroughEngine alloc] init];
+    [engine configureRecoveryWithQuiet:YES diag:NO];
+    // Extremely unlikely to be a valid live device id.
+    engine.boundDeviceID = (AudioDeviceID)0xFFFFFFF0u;
+    NSError *error = nil;
+    BOOL started = [engine startWithQuiet:YES error:&error];
+    if (started) {
+        fprintf(stderr, "expected start to fail with invalid boundDeviceID\n");
+        [engine stop];
+        return 1;
+    }
+    if ([engine ab_isActive]) {
+        fprintf(stderr, "expected ab_isActive false after bind failure\n");
+        [engine stop];
+        return 1;
+    }
+    if (error == nil) {
+        fprintf(stderr, "expected structured error on bind failure\n");
+        return 1;
+    }
+    NSString *operation = error.userInfo[@"operation"];
+    if (![operation isEqualToString:@"device_bind"] && ![operation isEqualToString:@"ab_start"]) {
+        // startWithQuiet returns bind error directly; ab_start may wrap — accept either.
+        fprintf(stderr, "unexpected error operation=%s domain=%s code=%ld\n",
+                operation.UTF8String ?: "(nil)", error.domain.UTF8String ?: "?", (long)error.code);
+        return 1;
+    }
+    return 0;
+}
+
 int main(void) {
     @autoreleasepool {
         int failed = 0;
         failed |= ABTestContractIsActiveLifecycle();
         failed |= ABTestContractStartProvidesStructuredErrorWhenUnderlyingErrorMissing();
         failed |= ABTestContractRebuildPreservesStructuredUnderlyingError();
+        failed |= ABTestContractIsActiveIsPointerNonNull();
+        failed |= ABTestContractRebuildSeqIncrementsOnSuccessfulStart();
+        failed |= ABTestContractInvalidBoundDeviceFailsStart();
         if (failed != 0) {
             fprintf(stderr, "ABPassThroughEngineContractTests failed\n");
         }
