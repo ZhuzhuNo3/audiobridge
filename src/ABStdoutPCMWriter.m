@@ -1,5 +1,7 @@
 #import "ABStdoutPCMWriter.h"
 
+#import "ABDiagSnapshot.h"
+
 #import <AVFoundation/AVFoundation.h>
 #import <dispatch/dispatch.h>
 #import <math.h>
@@ -232,8 +234,7 @@ static BOOL ABStdoutEnsureStructuredErrorOnFailure(BOOL succeeded, NSError **err
     _destinationFormat = destinationFormat;
 
     if (!quiet) {
-        fprintf(stderr, "pcm: s16le interleaved rate=%.0f channels=%u\n", effectiveDstRate,
-                (unsigned int)channelCount);
+        ABLogInfo(@"pcm: s16le interleaved rate=%.0f channels=%u", effectiveDstRate, (unsigned int)channelCount);
     }
     return YES;
 }
